@@ -1,7 +1,6 @@
 const std = @import("std");
 const ir = @import("../model/command_ir.zig");
 const ShellState = @import("../model/shell_state.zig").ShellState;
-const JobStatus = @import("../model/shell_state.zig").JobStatus;
 const ExecResult = @import("../model/result.zig").ExecResult;
 const parser = @import("../parse/parser.zig");
 const expander = @import("../expand/expander.zig");
@@ -13,6 +12,7 @@ const tty = @import("../platform/linux/tty.zig");
 
 const WUNTRACED: c_int = 2;
 const WCONTINUED: c_int = 8;
+const CommandNotFoundError = error{CommandNotFound};
 
 pub const Executor = struct {
     allocator: std.mem.Allocator,
@@ -113,6 +113,7 @@ pub const Executor = struct {
             .cd => try self.builtinCd(command.argv),
             .exit => try self.builtinExit(command.argv),
             .pwd => try self.builtinPwd(command.argv, std.posix.STDOUT_FILENO),
+            .type => try self.builtinType(command.argv, std.posix.STDOUT_FILENO),
             .@"export" => try self.builtinExport(command.argv),
             .unset => try self.builtinUnset(command.argv),
             .echo => try self.builtinEcho(command.argv, std.posix.STDOUT_FILENO),
@@ -141,7 +142,10 @@ pub const Executor = struct {
             const stdin_fd = previous_read orelse std.posix.STDIN_FILENO;
             const stdout_fd = if (pipefds) |fds| fds[1] else std.posix.STDOUT_FILENO;
 
-            const pid = try self.spawnCommand(command.*, stdin_fd, stdout_fd, std.posix.STDERR_FILENO, if (pgid == 0) 0 else pgid);
+            const pid = self.spawnCommand(command.*, stdin_fd, stdout_fd, std.posix.STDERR_FILENO, if (pgid == 0) 0 else pgid) catch |err| switch (err) {
+                error.CommandNotFound => return .{ .exit_code = 127 },
+                else => return err,
+            };
             child_pids[idx] = pid;
             if (pgid == 0) pgid = pid;
             std.posix.setpgid(pid, pgid) catch {};
@@ -156,46 +160,43 @@ pub const Executor = struct {
         }
 
         if (background) {
-            _ = try self.state.appendJob(pgid, pipeline.source, .running);
+            _ = try self.state.appendJob(pgid, pipeline.source, .running, count);
             var buf: [256]u8 = undefined;
-            const msg = try std.fmt.bufPrint(&buf, "[{d}] {d}\n", .{ self.state.jobs.items.len, pgid });
+            const msg = try std.fmt.bufPrint(&buf, "[{d}] {d}\n", .{ self.state.findLatestJob().?.id, pgid });
             _ = try std.posix.write(std.posix.STDOUT_FILENO, msg);
             return .{ .exit_code = 0 };
         }
 
         if (self.state.interactive) tty.takeTerminal(std.posix.STDIN_FILENO, pgid);
         defer if (self.state.interactive) tty.takeTerminal(std.posix.STDIN_FILENO, self.state.shell_pgid);
-        return try self.waitForegroundJob(pgid, pipeline.source);
+        return try self.waitForegroundJob(pgid, pipeline.source, count);
     }
 
-    fn waitForegroundJob(self: *Executor, pgid: i32, command_source: []const u8) !ExecResult {
+    fn waitForegroundJob(self: *Executor, pgid: i32, command_source: []const u8, process_count: usize) !ExecResult {
         var last_exit: u8 = 0;
+        var remaining = process_count;
         while (true) {
             var raw_status: c_int = 0;
             const pid = c.waitpid(-pgid, &raw_status, WUNTRACED | WCONTINUED);
             if (pid < 0) break;
             const st: u32 = @bitCast(raw_status);
             if (wait_status.wifStopped(st)) {
-                _ = try self.state.appendJob(pgid, command_source, .stopped);
+                _ = try self.state.appendJob(pgid, command_source, .stopped, remaining);
                 return .{ .exit_code = 128 + wait_status.wstopSig(st) };
             }
             if (wait_status.wifSignaled(st)) {
                 last_exit = 128 + wait_status.wtermSig(st);
+                if (remaining > 0) remaining -= 1;
             } else if (wait_status.wifExited(st)) {
                 last_exit = wait_status.wexitStatus(st);
+                if (remaining > 0) remaining -= 1;
             }
-            if (!self.processGroupExists(pgid)) break;
+            if (remaining == 0) break;
         }
         return .{ .exit_code = last_exit };
     }
 
-    fn processGroupExists(self: *Executor, pgid: i32) bool {
-        _ = self;
-        std.posix.kill(-pgid, 0) catch return false;
-        return true;
-    }
-
-    fn spawnCommand(self: *Executor, command: ExpandedCommand, stdin_fd: std.posix.fd_t, stdout_fd: std.posix.fd_t, stderr_fd: std.posix.fd_t, pgid: i32) !i32 {
+    fn spawnCommand(self: *Executor, command: ExpandedCommand, stdin_fd: std.posix.fd_t, stdout_fd: std.posix.fd_t, stderr_fd: std.posix.fd_t, pgid: i32) (CommandNotFoundError || anyerror)!i32 {
         if (builtins.lookup(command.argv[0])) |builtin| {
             return try self.spawnBuiltinChild(builtin, command, stdin_fd, stdout_fd, stderr_fd, pgid);
         }
@@ -224,14 +225,14 @@ pub const Executor = struct {
         return pid;
     }
 
-    fn spawnExternal(self: *Executor, command: ExpandedCommand, stdin_fd: std.posix.fd_t, stdout_fd: std.posix.fd_t, stderr_fd: std.posix.fd_t, pgid: i32) !i32 {
-        var env_map = std.process.EnvMap.init(self.allocator);
+    fn spawnExternal(self: *Executor, command: ExpandedCommand, stdin_fd: std.posix.fd_t, stdout_fd: std.posix.fd_t, stderr_fd: std.posix.fd_t, pgid: i32) (CommandNotFoundError || anyerror)!i32 {
+        var env_map = try command.makeEnvMap(self.allocator, self.state);
         defer env_map.deinit();
-        var it = self.state.env.iterator();
-        while (it.next()) |entry| {
-            try env_map.put(entry.key_ptr.*, entry.value_ptr.*);
-        }
-        for (command.assignments) |assignment| try env_map.put(assignment.name, assignment.value);
+        const resolved = try self.resolveExecutablePath(&env_map, command.argv[0]) orelse {
+            try self.writeShellErrorFmt("{s}: not found\n", .{command.argv[0]});
+            return error.CommandNotFound;
+        };
+        defer self.allocator.free(resolved);
 
         var arena_state = std.heap.ArenaAllocator.init(self.allocator);
         defer arena_state.deinit();
@@ -239,6 +240,7 @@ pub const Executor = struct {
         var argv_z = try arena.alloc(?[*:0]u8, command.argv.len + 1);
         for (command.argv, 0..) |arg, idx| argv_z[idx] = (try arena.dupeZ(u8, arg)).ptr;
         argv_z[command.argv.len] = null;
+        const resolved_z = try arena.dupeZ(u8, resolved);
         const envp = try std.process.createNullDelimitedEnvMap(arena, &env_map);
 
         const pid = try std.posix.fork();
@@ -249,7 +251,7 @@ pub const Executor = struct {
             if (stdout_fd != std.posix.STDOUT_FILENO) std.posix.dup2(stdout_fd, std.posix.STDOUT_FILENO) catch {};
             if (stderr_fd != std.posix.STDERR_FILENO) std.posix.dup2(stderr_fd, std.posix.STDERR_FILENO) catch {};
             applyChildRedirections(command.redirections) catch std.posix.exit(1);
-            std.posix.execvpeZ(argv_z[0].?, @ptrCast(argv_z.ptr), envp.ptr) catch {
+            std.posix.execveZ(resolved_z.ptr, @ptrCast(argv_z.ptr), envp.ptr) catch {
                 _ = std.posix.write(std.posix.STDERR_FILENO, "exec failed\n") catch {};
                 std.posix.exit(127);
             };
@@ -281,6 +283,33 @@ pub const Executor = struct {
         return .{ .exit_code = 0 };
     }
 
+    fn builtinType(self: *Executor, argv: [][]u8, fd: std.posix.fd_t) !ExecResult {
+        if (argv.len < 2) {
+            try self.writeShellError("type: missing operand\n");
+            return .{ .exit_code = 1 };
+        }
+
+        var exit_code: u8 = 0;
+        for (argv[1..]) |name| {
+            if (builtins.lookup(name)) |_| {
+                var buf: [512]u8 = undefined;
+                const rendered = try std.fmt.bufPrint(&buf, "{s} is a shell builtin\n", .{name});
+                _ = try std.posix.write(fd, rendered);
+                continue;
+            }
+            if (try self.resolveExecutablePath(&self.state.env, name)) |path| {
+                defer self.allocator.free(path);
+                var buf: [1024]u8 = undefined;
+                const rendered = try std.fmt.bufPrint(&buf, "{s} is {s}\n", .{ name, path });
+                _ = try std.posix.write(fd, rendered);
+            } else {
+                try self.writeShellErrorFmt("{s}: not found\n", .{name});
+                exit_code = 1;
+            }
+        }
+        return .{ .exit_code = exit_code };
+    }
+
     fn builtinExport(self: *Executor, argv: [][]u8) !ExecResult {
         if (argv.len < 2) return .{ .exit_code = 0 };
         for (argv[1..]) |item| {
@@ -309,23 +338,43 @@ pub const Executor = struct {
     }
 
     fn builtinJobs(self: *Executor, argv: [][]u8, fd: std.posix.fd_t) !ExecResult {
-        _ = argv;
         if (!self.state.interactive) {
             try self.writeShellError("jobs: interactive mode only\n");
             return .{ .exit_code = 1 };
         }
         jobs.poll(self.state);
-        try jobs.printJobs(self.state, fd);
+        if (argv.len >= 2) {
+            const job_id = jobs.parseJobSpec(self.state, argv[1]) orelse {
+                try self.writeShellError("jobs: no such job\n");
+                return .{ .exit_code = 1 };
+            };
+            const printed = try jobs.printJob(self.state, fd, job_id);
+            if (!printed) {
+                try self.writeShellError("jobs: no such job\n");
+                return .{ .exit_code = 1 };
+            }
+        } else {
+            try jobs.printJobs(self.state, fd);
+        }
         return .{ .exit_code = 0 };
     }
 
     fn builtinHistory(self: *Executor, argv: [][]u8, fd: std.posix.fd_t) !ExecResult {
-        _ = argv;
         if (!self.state.interactive) {
             try self.writeShellError("history: interactive mode only\n");
             return .{ .exit_code = 1 };
         }
-        for (self.state.history.items, 0..) |line, idx| {
+        var start_index: usize = 0;
+        if (argv.len >= 2) {
+            const limit = std.fmt.parseUnsigned(usize, argv[1], 10) catch {
+                try self.writeShellError("history: invalid limit\n");
+                return .{ .exit_code = 1 };
+            };
+            if (limit < self.state.history.items.len) {
+                start_index = self.state.history.items.len - limit;
+            }
+        }
+        for (self.state.history.items[start_index..], start_index..) |line, idx| {
             var buf: [2048]u8 = undefined;
             const rendered = try std.fmt.bufPrint(&buf, "{d}  {s}\n", .{ idx + 1, line });
             _ = try std.posix.write(fd, rendered);
@@ -368,7 +417,7 @@ pub const Executor = struct {
         defer tty.takeTerminal(std.posix.STDIN_FILENO, self.state.shell_pgid);
         try std.posix.kill(-job.pgid, std.posix.SIG.CONT);
         job.status = .running;
-        return try self.waitForegroundJob(job.pgid, job.command);
+        return try self.waitForegroundJob(job.pgid, job.command, job.remaining_processes);
     }
 
     fn builtinSource(self: *Executor, argv: [][]u8) anyerror!ExecResult {
@@ -387,6 +436,7 @@ pub const Executor = struct {
     fn runBuiltinChild(self: *Executor, builtin: builtins.Builtin, command: ExpandedCommand) !u8 {
         const result = switch (builtin) {
             .pwd => try self.builtinPwd(command.argv, std.posix.STDOUT_FILENO),
+            .type => try self.builtinType(command.argv, std.posix.STDOUT_FILENO),
             .echo => try self.builtinEcho(command.argv, std.posix.STDOUT_FILENO),
             .history => try self.builtinHistory(command.argv, std.posix.STDOUT_FILENO),
             else => ExecResult{ .exit_code = 1 },
@@ -394,9 +444,35 @@ pub const Executor = struct {
         return result.exit_code;
     }
 
+    fn resolveExecutablePath(self: *Executor, env_map: *const std.process.EnvMap, name: []const u8) !?[]u8 {
+        if (std.mem.indexOfScalar(u8, name, '/')) |_| {
+            std.posix.access(name, std.posix.X_OK) catch return null;
+            return try self.allocator.dupe(u8, name);
+        }
+
+        const path_env = env_map.get("PATH") orelse "/usr/local/bin:/bin:/usr/bin";
+        var it = std.mem.tokenizeScalar(u8, path_env, ':');
+        while (it.next()) |segment| {
+            const candidate = try std.fs.path.join(self.allocator, &.{ segment, name });
+            errdefer self.allocator.free(candidate);
+            std.posix.access(candidate, std.posix.X_OK) catch {
+                self.allocator.free(candidate);
+                continue;
+            };
+            return candidate;
+        }
+        return null;
+    }
+
     fn writeShellError(self: *Executor, text: []const u8) !void {
         _ = self;
         _ = try std.posix.write(std.posix.STDERR_FILENO, text);
+    }
+
+    fn writeShellErrorFmt(self: *Executor, comptime fmt: []const u8, args: anytype) !void {
+        var buf: [1024]u8 = undefined;
+        const rendered = try std.fmt.bufPrint(&buf, fmt, args);
+        try self.writeShellError(rendered);
     }
 };
 
@@ -451,6 +527,18 @@ const ExpandedCommand = struct {
         };
     }
 
+    fn makeEnvMap(self: ExpandedCommand, allocator: std.mem.Allocator, state: *ShellState) !std.process.EnvMap {
+        var env_map = std.process.EnvMap.init(allocator);
+        var it = state.env.iterator();
+        while (it.next()) |entry| {
+            try env_map.put(entry.key_ptr.*, entry.value_ptr.*);
+        }
+        for (self.assignments) |assignment| {
+            try env_map.put(assignment.name, assignment.value);
+        }
+        return env_map;
+    }
+
     fn deinit(self: *ExpandedCommand, allocator: std.mem.Allocator) void {
         for (self.argv) |item| allocator.free(item);
         allocator.free(self.argv);
@@ -497,7 +585,7 @@ const RedirectRestore = struct {
                     const target_fd: std.posix.fd_t = switch (redir.kind) {
                         .stdin_file => std.posix.STDIN_FILENO,
                         .stdout_truncate, .stdout_append => std.posix.STDOUT_FILENO,
-                        .stderr_truncate => std.posix.STDERR_FILENO,
+                        .stderr_truncate, .stderr_append => std.posix.STDERR_FILENO,
                         .stderr_to_stdout => unreachable,
                     };
                     try restorer.pushDup(target_fd);
@@ -535,7 +623,7 @@ fn applyChildRedirections(redirections: []const ExpandedRedirection) !void {
                 const target_fd: std.posix.fd_t = switch (redir.kind) {
                     .stdin_file => std.posix.STDIN_FILENO,
                     .stdout_truncate, .stdout_append => std.posix.STDOUT_FILENO,
-                    .stderr_truncate => std.posix.STDERR_FILENO,
+                    .stderr_truncate, .stderr_append => std.posix.STDERR_FILENO,
                     .stderr_to_stdout => unreachable,
                 };
                 try std.posix.dup2(fd, target_fd);
@@ -551,6 +639,7 @@ fn openRedirection(redir: ExpandedRedirection) !std.posix.fd_t {
         .stdout_truncate => std.posix.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o644),
         .stdout_append => std.posix.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true }, 0o644),
         .stderr_truncate => std.posix.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o644),
+        .stderr_append => std.posix.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true }, 0o644),
         .stderr_to_stdout => unreachable,
     };
 }

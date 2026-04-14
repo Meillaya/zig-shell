@@ -4,6 +4,7 @@ pub const Builtin = enum {
     cd,
     exit,
     pwd,
+    type,
     @"export",
     unset,
     echo,
@@ -18,6 +19,7 @@ pub const names = [_][]const u8{
     "cd",
     "exit",
     "pwd",
+    "type",
     "export",
     "unset",
     "echo",
@@ -33,6 +35,7 @@ pub fn lookup(name: []const u8) ?Builtin {
     if (std.mem.eql(u8, name, "cd")) return .cd;
     if (std.mem.eql(u8, name, "exit")) return .exit;
     if (std.mem.eql(u8, name, "pwd")) return .pwd;
+    if (std.mem.eql(u8, name, "type")) return .type;
     if (std.mem.eql(u8, name, "export")) return .@"export";
     if (std.mem.eql(u8, name, "unset")) return .unset;
     if (std.mem.eql(u8, name, "echo")) return .echo;
@@ -47,7 +50,7 @@ pub fn lookup(name: []const u8) ?Builtin {
 pub fn isParentOnly(builtin: Builtin) bool {
     return switch (builtin) {
         .cd, .exit, .@"export", .unset, .source, .jobs, .fg, .bg => true,
-        .pwd, .echo, .history => false,
+        .pwd, .type, .echo, .history => false,
     };
 }
 

@@ -28,6 +28,11 @@ def read_for(fd: int, seconds: float) -> bytes:
     return data
 
 
+def send_and_read(fd: int, data: bytes, seconds: float) -> str:
+    os.write(fd, data)
+    return clean(read_for(fd, seconds))
+
+
 def spawn(home: str, shell: pathlib.Path):
     pid, fd = pty.fork()
     if pid == 0:
@@ -48,18 +53,25 @@ def main() -> int:
     log = []
     pid, fd = spawn(home, shell)
     log.append(('startup', clean(read_for(fd, 0.5))))
-    os.write(fd, b'echo $ZIGSHRC_LOADED\n')
-    log.append(('rc_config', clean(read_for(fd, 0.6))))
-    os.write(fd, b'echo persisted\n')
-    log.append(('history_record', clean(read_for(fd, 0.6))))
-    os.write(fd, b'sleep 2 &\n')
-    log.append(('background_launch', clean(read_for(fd, 0.6))))
-    os.write(fd, b'jobs\n')
-    log.append(('jobs', clean(read_for(fd, 0.6))))
-    os.write(fd, b'ls sam\t\n')
-    log.append(('path_completion', clean(read_for(fd, 0.8))))
-    os.write(fd, b'pw\t\n')
-    log.append(('command_completion', clean(read_for(fd, 0.8))))
+    log.append(('rc_config', send_and_read(fd, b'echo $ZIGSHRC_LOADED\n', 0.6)))
+    log.append(('history_record', send_and_read(fd, b'echo persisted\n', 0.6)))
+    log.append(('background_launch', send_and_read(fd, b'sleep 2 &\n', 0.6)))
+    log.append(('jobs_single', send_and_read(fd, b'jobs %1\n', 0.6)))
+    log.append(('jobs_all', send_and_read(fd, b'jobs\n', 0.6)))
+
+    # Two jobs for multi-job and recycle coverage.
+    log.append(('background_launch_recycled', send_and_read(fd, b'sleep 3 &\n', 0.5)))
+    log.append(('background_launch_second', send_and_read(fd, b'sleep 3 &\n', 0.5)))
+    log.append(('jobs_multi', send_and_read(fd, b'jobs\n', 0.6)))
+    _ = read_for(fd, 3.4)
+    log.append(('jobs_after_reap', send_and_read(fd, b'jobs\n', 0.6)))
+    log.append(('background_launch_reuse', send_and_read(fd, b'sleep 1 &\n', 0.5)))
+
+    log.append(('path_completion', send_and_read(fd, b'ls sam\t\n', 0.8)))
+    log.append(('command_completion', send_and_read(fd, b'pw\t\n', 0.8)))
+    log.append(('type_builtin', send_and_read(fd, b'type echo\n', 0.4)))
+    log.append(('type_external', send_and_read(fd, b'type /bin/sh\n', 0.4)))
+
     os.write(fd, b'sleep 5\n')
     _ = read_for(fd, 0.2)
     os.write(fd, b'\x03')
@@ -88,10 +100,16 @@ def main() -> int:
         'rc_config_loading': '1' in dict(log)['rc_config'],
         'history_persistence': 'echo persisted' in history_text,
         'history_recall_manual_primary': True,
-        'background_jobs_jobs': 'Running' in dict(log)['jobs'],
+        'background_jobs_jobs': 'Running' in dict(log)['jobs_all'],
+        'jobs_single': '[1]' in dict(log)['jobs_single'],
+        'jobs_multi': dict(log)['jobs_multi'].count('Running') >= 2,
+        'jobs_reap_before_prompt': 'Running' not in dict(log)['jobs_after_reap'],
+        'jobs_recycle': '[1]' in dict(log)['background_launch_reuse'],
         'ctrl_c_recovery': 'zigsh$' in dict(log)['ctrl_c'],
         'path_completion': 'alpha.txt' in dict(log)['path_completion'],
         'command_completion': 'pwd' in dict(log)['command_completion'],
+        'type_builtin': 'echo is a shell builtin' in dict(log)['type_builtin'],
+        'type_external': '/bin/sh' in dict(log)['type_external'],
     }
 
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
@@ -108,7 +126,21 @@ def main() -> int:
         for key, value in checks.items():
             f.write(f'- {key}: {value}\n')
     print(json.dumps({'output': str(OUTPUT), 'checks': checks}, indent=2))
-    required = ['prompt_appears', 'rc_config_loading', 'history_persistence', 'background_jobs_jobs', 'ctrl_c_recovery', 'path_completion', 'command_completion']
+    required = [
+        'prompt_appears',
+        'rc_config_loading',
+        'history_persistence',
+        'background_jobs_jobs',
+        'jobs_single',
+        'jobs_multi',
+        'jobs_reap_before_prompt',
+        'jobs_recycle',
+        'ctrl_c_recovery',
+        'path_completion',
+        'command_completion',
+        'type_builtin',
+        'type_external',
+    ]
     return 0 if all(checks[key] for key in required) else 1
 
 

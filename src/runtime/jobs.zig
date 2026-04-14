@@ -20,7 +20,12 @@ pub fn poll(state: *ShellState) void {
             } else if (status.wifContinued(st)) {
                 job.status = .running;
             } else if (status.wifExited(st) or status.wifSignaled(st)) {
-                job.status = .done;
+                if (job.remaining_processes > 0) job.remaining_processes -= 1;
+                if (job.remaining_processes == 0) {
+                    job.status = .done;
+                } else {
+                    job.status = .running;
+                }
             }
         }
     }
@@ -37,6 +42,19 @@ pub fn printJobs(state: *ShellState, fd: std.posix.fd_t) !void {
         const rendered = try std.fmt.bufPrint(&buf, "[{d}] {s}\t{s}\n", .{ job.id, label, job.command });
         _ = try std.posix.write(fd, rendered);
     }
+}
+
+pub fn printJob(state: *ShellState, fd: std.posix.fd_t, id: usize) !bool {
+    const job = state.findJobById(id) orelse return false;
+    const label = switch (job.status) {
+        .running => "Running",
+        .stopped => "Stopped",
+        .done => "Done",
+    };
+    var buf: [1024]u8 = undefined;
+    const rendered = try std.fmt.bufPrint(&buf, "[{d}] {s}\t{s}\n", .{ job.id, label, job.command });
+    _ = try std.posix.write(fd, rendered);
+    return true;
 }
 
 pub fn parseJobSpec(state: *ShellState, text: ?[]const u8) ?usize {

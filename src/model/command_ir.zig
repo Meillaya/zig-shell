@@ -47,6 +47,7 @@ pub const RedirectionKind = enum {
     stdout_truncate,
     stdout_append,
     stderr_truncate,
+    stderr_append,
     stderr_to_stdout,
 };
 

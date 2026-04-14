@@ -15,15 +15,19 @@ pub fn loadHistory(state: *ShellState) !void {
         if (line.len == 0) continue;
         try state.history.append(state.allocator, try state.allocator.dupe(u8, line));
     }
+    state.markHistoryLoaded();
 }
 
 pub fn saveHistory(state: *ShellState) !void {
     if (!state.interactive) return;
-    const file = try std.fs.cwd().createFile(state.history_path, .{ .truncate = true });
+    const file = try std.fs.cwd().createFile(state.history_path, .{ .truncate = !state.historyAppendEnabled() });
     defer file.close();
+    if (state.historyAppendEnabled()) try file.seekFromEnd(0);
     var writer = file.deprecatedWriter();
-    for (state.history.items) |line| {
+    const start_index: usize = if (state.historyAppendEnabled()) state.loaded_history_count else 0;
+    for (state.history.items[start_index..]) |line| {
         try writer.writeAll(line);
         try writer.writeByte('\n');
     }
+    state.markHistoryLoaded();
 }

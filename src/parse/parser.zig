@@ -133,6 +133,10 @@ pub const Parser = struct {
     }
 
     fn parseRedirection(self: *Parser) ParseError!ir.Redirection {
+        if (self.matchString("2>>")) {
+            self.skipHorizontalSpace();
+            return .{ .kind = .stderr_append, .target = try self.parseWord() };
+        }
         if (self.matchString("2>&1")) return .{ .kind = .stderr_to_stdout, .target = null };
         if (self.matchString("2>")) {
             self.skipHorizontalSpace();
@@ -269,7 +273,7 @@ pub const Parser = struct {
     }
 
     fn atRedirection(self: *Parser) bool {
-        return self.peekString("2>&1") or self.peekString("2>") or self.peekString(">>") or self.peekString(">") or self.peekString("<");
+        return self.peekString("2>>") or self.peekString("2>&1") or self.peekString("2>") or self.peekString(">>") or self.peekString(">") or self.peekString("<");
     }
 
     fn skipHorizontalSpace(self: *Parser) void {
@@ -329,6 +333,13 @@ test "parse pipeline and redirection" {
     try std.testing.expectEqual(@as(usize, 1), cmd_list.pipelines.len);
     try std.testing.expectEqual(@as(usize, 2), cmd_list.pipelines[0].commands.len);
     try std.testing.expectEqual(@as(usize, 1), cmd_list.pipelines[0].commands[1].redirections.len);
+}
+
+test "parse stderr append redirection" {
+    var cmd_list = try parse(std.testing.allocator, "echo hi 2>> err.txt\n");
+    defer cmd_list.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), cmd_list.pipelines[0].commands[0].redirections.len);
+    try std.testing.expectEqual(ir.RedirectionKind.stderr_append, cmd_list.pipelines[0].commands[0].redirections[0].kind);
 }
 
 test "reject unsupported constructs" {

@@ -3,6 +3,7 @@ const ShellState = @import("model/shell_state.zig").ShellState;
 const Executor = @import("runtime/executor.zig").Executor;
 const config = @import("config/config.zig");
 const editor = @import("input/editor.zig");
+const jobs = @import("runtime/jobs.zig");
 const signals = @import("platform/linux/signals.zig");
 const tty = @import("platform/linux/tty.zig");
 const script = @import("script/script.zig");
@@ -75,6 +76,8 @@ pub const ShellApp = struct {
 
     fn runInteractive(self: *ShellApp) !void {
         while (!self.state.should_exit) {
+            jobs.poll(&self.state);
+            self.state.removeCompletedJobs();
             const line = (try editor.readLine(self.allocator, &self.state)) orelse break;
             defer self.allocator.free(line);
             const trimmed = std.mem.trim(u8, line, " \t\r\n");

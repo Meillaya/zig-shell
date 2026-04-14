@@ -1,0 +1,58 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Zig 0.15.2
+        run: |
+          set -eux
+          curl -L https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz -o zig.tar.xz
+          tar -xf zig.tar.xz
+          echo "$PWD/zig-x86_64-linux-0.15.2" >> "$GITHUB_PATH"
+
+      - name: Verify Zig version
+        run: zig version
+
+      - name: Build
+        run: zig build
+
+      - name: Test
+        run: zig build test
+
+      - name: PTY smoke
+        run: zig build pty-smoke
+
+      - name: Package release archive
+        run: |
+          set -eux
+          TAG="${GITHUB_REF_NAME}"
+          mkdir -p dist/zig-shell-linux-x86_64
+          cp zig-out/bin/zig-shell dist/zig-shell-linux-x86_64/
+          cp README.md LICENSE* dist/zig-shell-linux-x86_64/ 2>/dev/null || true
+          cp -r docs/verification dist/zig-shell-linux-x86_64/docs-verification
+          tar -C dist -czf "zig-shell-linux-x86_64-${TAG}.tar.gz" zig-shell-linux-x86_64
+
+      - name: Create or update GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eux
+          TAG="${GITHUB_REF_NAME}"
+          ASSET="zig-shell-linux-x86_64-${TAG}.tar.gz"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$ASSET" --clobber
+          else
+            gh release create "$TAG" "$ASSET" --title "$TAG" --notes "Automated release for $TAG"
+          fi

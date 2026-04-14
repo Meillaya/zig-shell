@@ -11,6 +11,7 @@ pub const Job = struct {
     pgid: i32,
     command: []u8,
     status: JobStatus,
+    remaining_processes: usize,
     last_status: ?u32 = null,
 };
 
@@ -19,7 +20,9 @@ pub const ShellState = struct {
     env: std.process.EnvMap,
     cwd: []u8,
     history: std.ArrayList([]u8),
+    loaded_history_count: usize,
     jobs: std.ArrayList(Job),
+    free_job_ids: std.ArrayList(usize),
     last_exit_status: u8,
     interactive: bool,
     should_exit: bool,
@@ -41,7 +44,9 @@ pub const ShellState = struct {
             .env = env,
             .cwd = cwd,
             .history = .empty,
+            .loaded_history_count = 0,
             .jobs = .empty,
+            .free_job_ids = .empty,
             .last_exit_status = 0,
             .interactive = interactive,
             .should_exit = false,
@@ -65,6 +70,7 @@ pub const ShellState = struct {
         self.history.deinit(self.allocator);
         for (self.jobs.items) |job| self.allocator.free(job.command);
         self.jobs.deinit(self.allocator);
+        self.free_job_ids.deinit(self.allocator);
         self.allocator.free(self.history_path);
         self.allocator.free(self.rc_path);
         self.* = undefined;
@@ -91,13 +97,23 @@ pub const ShellState = struct {
         try self.history.append(self.allocator, duped);
     }
 
-    pub fn appendJob(self: *ShellState, pgid: i32, command: []const u8, status: JobStatus) !usize {
-        const id = self.jobs.items.len + 1;
+    pub fn markHistoryLoaded(self: *ShellState) void {
+        self.loaded_history_count = self.history.items.len;
+    }
+
+    pub fn historyAppendEnabled(self: *const ShellState) bool {
+        const value = self.env.get("HISTAPPEND") orelse return false;
+        return std.mem.eql(u8, value, "1") or std.mem.eql(u8, value, "true") or std.mem.eql(u8, value, "yes");
+    }
+
+    pub fn appendJob(self: *ShellState, pgid: i32, command: []const u8, status: JobStatus, remaining_processes: usize) !usize {
+        const id = self.takeJobId();
         try self.jobs.append(self.allocator, .{
             .id = id,
             .pgid = pgid,
             .command = try self.allocator.dupe(u8, command),
             .status = status,
+            .remaining_processes = remaining_processes,
             .last_status = null,
         });
         return id;
@@ -119,11 +135,34 @@ pub const ShellState = struct {
         var i: usize = 0;
         while (i < self.jobs.items.len) {
             if (self.jobs.items[i].status == .done) {
+                self.releaseJobId(self.jobs.items[i].id) catch {};
                 self.allocator.free(self.jobs.items[i].command);
                 _ = self.jobs.orderedRemove(i);
             } else {
                 i += 1;
             }
         }
+    }
+
+    fn takeJobId(self: *ShellState) usize {
+        if (self.free_job_ids.items.len == 0) return self.jobs.items.len + 1;
+
+        var best_index: usize = 0;
+        var best_value = self.free_job_ids.items[0];
+        for (self.free_job_ids.items[1..], 1..) |value, idx| {
+            if (value < best_value) {
+                best_value = value;
+                best_index = idx;
+            }
+        }
+        _ = self.free_job_ids.orderedRemove(best_index);
+        return best_value;
+    }
+
+    fn releaseJobId(self: *ShellState, id: usize) !void {
+        for (self.free_job_ids.items) |existing| {
+            if (existing == id) return;
+        }
+        try self.free_job_ids.append(self.allocator, id);
     }
 };
