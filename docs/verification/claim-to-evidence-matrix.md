@@ -1,6 +1,6 @@
 # Claim-to-Evidence Matrix
 
-This matrix is the primary ownership map for retained zig-shell claims after the focused subshells + stronger command substitution milestone.
+This matrix is the primary ownership map for retained zig-shell claims after the bounded functions + execution-context milestone.
 
 | Claim | Primary evidence source | Supporting evidence | Status |
 |---|---|---|---|
@@ -17,7 +17,7 @@ This matrix is the primary ownership map for retained zig-shell claims after the
 | History up/down navigation works interactively | manual checklist | transcript | retained, manual-primary |
 | Command completion works for the bounded current subset | `zig build pty-smoke` | transcript, manual checklist | retained, bounded subset |
 | Path completion works for the bounded current subset | `zig build pty-smoke` | transcript, manual checklist | retained, bounded subset |
-| `type` reports builtin vs executable vs not found consistently with execution lookup | integration test (`src/test_support/harness.zig`) | transcript/manual demo | retained |
+| `type` reports function / builtin / executable / not found consistently with execution lookup | integration test (`src/test_support/harness.zig`) | transcript/manual demo | retained |
 | `2>>` appends stderr correctly | integration test (`src/test_support/harness.zig`) | transcript/manual demo | retained |
 | Child-safe builtins can participate in pipelines while parent-only builtins remain rejected | integration test (`src/test_support/harness.zig`) | manual checklist | retained |
 | `&&` / `||` short-circuit correctly | integration test (`src/test_support/harness.zig`) | docs | retained |
@@ -25,6 +25,9 @@ This matrix is the primary ownership map for retained zig-shell claims after the
 | Heredoc content reaches stdin of the target command | integration test (`src/test_support/harness.zig`) | docs | retained |
 | Bounded `$(...)` command substitution works in basic argument position | integration test (`src/test_support/harness.zig`) | docs | retained |
 | Bounded subshell groups `( ... )` execute and isolate parent state correctly | integration test (`src/test_support/harness.zig`) | docs | retained |
+| `name() { ... }` functions can be defined and invoked | integration test (`src/test_support/harness.zig`) | docs | retained |
+| Function lookup precedence is deterministic and bounded | integration test (`src/test_support/harness.zig`) | docs | retained |
+| Function definitions/mutations isolate correctly across subshell and `$(...)` contexts | integration test (`src/test_support/harness.zig`) | docs | retained |
 | Prompt can be influenced by shell config (`PS1`) | manual checklist | transcript | retained, manual-primary |
 | Cursor-aware editing is available (left/right, insertion, backspace at cursor) | manual checklist | transcript | retained, manual-primary |
 | Completion redraw/candidate UX polish | manual checklist only | transcript | manual-only |

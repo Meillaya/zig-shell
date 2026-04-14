@@ -67,6 +67,17 @@ pub const Executor = struct {
     }
 
     fn executePipeline(self: *Executor, pipeline: ir.Pipeline) anyerror!ExecResult {
+        if (pipeline.commands.len == 1) {
+            switch (pipeline.commands[0]) {
+                .function_def => |function_def| {
+                    if (pipeline.background) return error.UnsupportedFeature;
+                    try self.state.defineFunction(function_def.name, function_def.body);
+                    return .{ .exit_code = 0 };
+                },
+                else => {},
+            }
+        }
+
         var expanded = try self.expandPipeline(pipeline);
         defer expanded.deinit(self.allocator);
 
@@ -100,6 +111,9 @@ pub const Executor = struct {
                             if (builtins.isParentOnly(builtin)) {
                                 return try self.runBuiltinParent(builtin, command);
                             }
+                        }
+                        if (self.state.getFunction(command.argv[0])) |_| {
+                            return try self.runFunctionParent(command);
                         }
                     }
                 },
@@ -138,6 +152,7 @@ pub const Executor = struct {
             switch (command) {
                 .simple => |simple| try commands.append(self.allocator, .{ .simple = try ExpandedCommand.init(self.allocator, self.state, simple) }),
                 .subshell => |subshell| try commands.append(self.allocator, .{ .subshell = try ExpandedSubshell.init(self.allocator, self.state, subshell) }),
+                .function_def => return error.UnsupportedFeature,
             }
         }
         return .{ .commands = try commands.toOwnedSlice(self.allocator), .source = pipeline.source };
@@ -242,6 +257,14 @@ pub const Executor = struct {
         return switch (command) {
             .simple => |simple| blk: {
                 if (builtins.lookup(simple.argv[0])) |builtin| {
+                    if (builtins.isParentOnly(builtin)) {
+                        break :blk try self.spawnBuiltinChild(builtin, simple, stdin_fd, stdout_fd, stderr_fd, pgid);
+                    }
+                }
+                if (self.state.getFunction(simple.argv[0])) |_| {
+                    break :blk try self.spawnFunctionChild(simple, stdin_fd, stdout_fd, stderr_fd, pgid);
+                }
+                if (builtins.lookup(simple.argv[0])) |builtin| {
                     break :blk try self.spawnBuiltinChild(builtin, simple, stdin_fd, stdout_fd, stderr_fd, pgid);
                 }
                 break :blk try self.spawnExternal(simple, stdin_fd, stdout_fd, stderr_fd, pgid);
@@ -337,6 +360,46 @@ pub const Executor = struct {
         return pid;
     }
 
+    fn runFunctionParent(self: *Executor, command: ExpandedCommand) !ExecResult {
+        const body = self.state.getFunction(command.argv[0]).?;
+        var restore = try RedirectRestore.apply(self.allocator, command.redirections);
+        defer restore.restore();
+        try self.state.pushCallFrame(command.argv[1..]);
+        defer self.state.popCallFrame();
+        return try self.executeText(body, false);
+    }
+
+    fn spawnFunctionChild(self: *Executor, command: ExpandedCommand, stdin_fd: std.posix.fd_t, stdout_fd: std.posix.fd_t, stderr_fd: std.posix.fd_t, pgid: i32) !i32 {
+        const pid = try std.posix.fork();
+        if (pid == 0) {
+            if (pgid == 0) std.posix.setpgid(0, 0) catch {} else std.posix.setpgid(0, pgid) catch {};
+            signals.resetForChild();
+            if (stdin_fd != std.posix.STDIN_FILENO) std.posix.dup2(stdin_fd, std.posix.STDIN_FILENO) catch {};
+            if (stdout_fd != std.posix.STDOUT_FILENO) std.posix.dup2(stdout_fd, std.posix.STDOUT_FILENO) catch {};
+            if (stderr_fd != std.posix.STDERR_FILENO) std.posix.dup2(stderr_fd, std.posix.STDERR_FILENO) catch {};
+            applyChildRedirections(command.redirections) catch std.posix.exit(1);
+
+            var child_state = self.state.*;
+            child_state.interactive = false;
+            child_state.should_exit = false;
+            child_state.exit_code = 0;
+            child_state.jobs = .empty;
+            child_state.free_job_ids = .empty;
+            defer child_state.jobs.deinit(self.allocator);
+            defer child_state.free_job_ids.deinit(self.allocator);
+
+            try child_state.pushCallFrame(command.argv[1..]);
+            defer child_state.popCallFrame();
+
+            var child_executor = Executor.init(self.allocator, &child_state);
+            const body = child_state.getFunction(command.argv[0]).?;
+            const result = child_executor.executeText(body, false) catch std.posix.exit(1);
+            std.posix.exit(result.exit_code);
+        }
+        std.posix.setpgid(pid, if (pgid == 0) pid else pgid) catch {};
+        return pid;
+    }
+
     fn builtinCd(self: *Executor, argv: [][]u8) !ExecResult {
         const target = if (argv.len >= 2) argv[1] else self.state.env.get("HOME") orelse self.state.cwd;
         std.posix.chdir(target) catch {
@@ -367,6 +430,20 @@ pub const Executor = struct {
 
         var exit_code: u8 = 0;
         for (argv[1..]) |name| {
+            if (builtins.lookup(name)) |builtin| {
+                if (builtins.isParentOnly(builtin)) {
+                    var buf: [512]u8 = undefined;
+                    const rendered = try std.fmt.bufPrint(&buf, "{s} is a shell builtin\n", .{name});
+                    _ = try std.posix.write(fd, rendered);
+                    continue;
+                }
+            }
+            if (self.state.getFunction(name)) |_| {
+                var buf: [512]u8 = undefined;
+                const rendered = try std.fmt.bufPrint(&buf, "{s} is a shell function\n", .{name});
+                _ = try std.posix.write(fd, rendered);
+                continue;
+            }
             if (builtins.lookup(name)) |_| {
                 var buf: [512]u8 = undefined;
                 const rendered = try std.fmt.bufPrint(&buf, "{s} is a shell builtin\n", .{name});
@@ -810,6 +887,10 @@ fn expandWordRuntimeDetailed(allocator: std.mem.Allocator, state: *ShellState, w
                     var buf: [16]u8 = undefined;
                     const rendered = try std.fmt.bufPrint(&buf, "{d}", .{state.last_exit_status});
                     try output.appendSlice(allocator, rendered);
+                } else if (std.fmt.parseUnsigned(usize, data.text, 10) catch null) |index| {
+                    if (state.currentPositional(index)) |value| {
+                        try output.appendSlice(allocator, value);
+                    }
                 } else if (state.env.get(data.text)) |value| {
                     try output.appendSlice(allocator, value);
                 }
@@ -1063,6 +1144,8 @@ fn splitLogicalChain(allocator: std.mem.Allocator, input: []const u8) !LogicalCh
     var in_single = false;
     var in_double = false;
     var command_depth: usize = 0;
+    var subshell_depth: usize = 0;
+    var brace_depth: usize = 0;
     while (i < input.len) : (i += 1) {
         const ch = input[i];
         if (!in_double and ch == '\'') {
@@ -1082,11 +1165,27 @@ fn splitLogicalChain(allocator: std.mem.Allocator, input: []const u8) !LogicalCh
             i += 1;
             continue;
         }
+        if (!in_single and !in_double and command_depth == 0 and ch == '(') {
+            subshell_depth += 1;
+            continue;
+        }
         if (!in_single and !in_double and ch == ')' and command_depth > 0) {
             command_depth -= 1;
             continue;
         }
-        if (in_single or in_double or command_depth > 0) continue;
+        if (!in_single and !in_double and command_depth == 0 and ch == ')' and subshell_depth > 0) {
+            subshell_depth -= 1;
+            continue;
+        }
+        if (!in_single and !in_double and ch == '{') {
+            brace_depth += 1;
+            continue;
+        }
+        if (!in_single and !in_double and ch == '}' and brace_depth > 0) {
+            brace_depth -= 1;
+            continue;
+        }
+        if (in_single or in_double or command_depth > 0 or subshell_depth > 0 or brace_depth > 0) continue;
         if (i + 1 < input.len and input[i] == '&' and input[i + 1] == '&') {
             try segments.append(allocator, try allocator.dupe(u8, std.mem.trim(u8, input[start..i], " \t\r\n")));
             try ops.append(allocator, .and_and);

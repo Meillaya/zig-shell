@@ -15,9 +15,21 @@ pub const Job = struct {
     last_status: ?u32 = null,
 };
 
+pub const CallFrame = struct {
+    args: [][]u8,
+
+    pub fn deinit(self: *CallFrame, allocator: std.mem.Allocator) void {
+        for (self.args) |arg| allocator.free(arg);
+        allocator.free(self.args);
+        self.* = undefined;
+    }
+};
+
 pub const ShellState = struct {
     allocator: std.mem.Allocator,
     env: std.process.EnvMap,
+    functions: std.StringHashMap([]u8),
+    call_frames: std.ArrayList(CallFrame),
     cwd: []u8,
     history: std.ArrayList([]u8),
     loaded_history_count: usize,
@@ -44,6 +56,8 @@ pub const ShellState = struct {
         return .{
             .allocator = allocator,
             .env = env,
+            .functions = std.StringHashMap([]u8).init(allocator),
+            .call_frames = .empty,
             .cwd = cwd,
             .history = .empty,
             .loaded_history_count = 0,
@@ -68,6 +82,14 @@ pub const ShellState = struct {
             _ = entry;
         }
         self.env.deinit();
+        var fn_it = self.functions.iterator();
+        while (fn_it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            self.allocator.free(entry.value_ptr.*);
+        }
+        self.functions.deinit();
+        for (self.call_frames.items) |*frame| frame.deinit(self.allocator);
+        self.call_frames.deinit(self.allocator);
         self.allocator.free(self.cwd);
         for (self.history.items) |line| self.allocator.free(line);
         self.history.deinit(self.allocator);
@@ -82,6 +104,44 @@ pub const ShellState = struct {
 
     pub fn setEnv(self: *ShellState, name: []const u8, value: []const u8) !void {
         try self.env.put(name, value);
+    }
+
+    pub fn defineFunction(self: *ShellState, name: []const u8, body: []const u8) !void {
+        const key = try self.allocator.dupe(u8, name);
+        const value = try self.allocator.dupe(u8, body);
+        if (try self.functions.fetchPut(key, value)) |previous| {
+            self.allocator.free(previous.key);
+            self.allocator.free(previous.value);
+        }
+    }
+
+    pub fn getFunction(self: *const ShellState, name: []const u8) ?[]const u8 {
+        return self.functions.get(name);
+    }
+
+    pub fn pushCallFrame(self: *ShellState, args: []const []const u8) !void {
+        var stored = try self.allocator.alloc([]u8, args.len);
+        errdefer {
+            for (stored[0..args.len]) |arg| self.allocator.free(arg);
+            self.allocator.free(stored);
+        }
+        for (args, 0..) |arg, idx| {
+            stored[idx] = try self.allocator.dupe(u8, arg);
+        }
+        try self.call_frames.append(self.allocator, .{ .args = stored });
+    }
+
+    pub fn popCallFrame(self: *ShellState) void {
+        if (self.call_frames.items.len == 0) return;
+        var frame = self.call_frames.pop().?;
+        frame.deinit(self.allocator);
+    }
+
+    pub fn currentPositional(self: *const ShellState, index: usize) ?[]const u8 {
+        if (self.call_frames.items.len == 0) return null;
+        const frame = self.call_frames.items[self.call_frames.items.len - 1];
+        if (index == 0 or index > frame.args.len) return null;
+        return frame.args[index - 1];
     }
 
     pub fn unsetEnv(self: *ShellState, name: []const u8) void {

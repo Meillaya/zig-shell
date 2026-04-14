@@ -46,6 +46,7 @@ python3 scripts/generate_interactive_transcript.py zig-out/bin/zig-shell
 - pipelines with `|`
 - conditionals with `&&` and `||`
 - bounded subshell groups `( ... )`
+- bounded shell functions with `name() { ... }`
 - child-safe builtins in pipelines (`echo`, `pwd`, `history`, `type`)
 - parent-mutating builtins stay rejected in pipeline/background contexts
 - redirection: `>`, `>>`, `<`, `2>`, `2>>`, `2>&1`
@@ -66,6 +67,8 @@ python3 scripts/generate_interactive_transcript.py zig-out/bin/zig-shell
 - non-interactive script execution
 
 ### Intentionally bounded
+- shell functions support one definition form only: `name() { ... }`
+- function bodies are stored as bounded text and re-parsed on call
 - subshell support is bounded, not full compound-command parity
 - command substitution is bounded and intentionally conservative
 - heredocs are intentionally narrow (no tab-strip mode)
@@ -73,7 +76,7 @@ python3 scripts/generate_interactive_transcript.py zig-out/bin/zig-shell
 - history/completion UX polish is still rough
 
 ### Not supported
-- shell functions
+- alternate function-definition syntax forms
 - backtick command substitution
 - brace expansion
 - full general shell grammar parity

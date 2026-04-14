@@ -53,16 +53,26 @@ pub const Parser = struct {
             switch (command) {
                 .simple => |simple| if (simple.isEmpty()) return error.UnexpectedToken,
                 .subshell => {},
+                .function_def => {},
             }
             try commands.append(self.allocator, command);
             self.skipHorizontalSpace();
             if (self.peekTwo('&', '&') or self.peekTwo('|', '|')) return error.UnsupportedConstruct;
             if (!self.matchChar('|')) break;
+            if (commands.items[commands.items.len - 1] == .function_def) return error.UnsupportedConstruct;
             self.skipHorizontalSpace();
         }
 
         self.skipHorizontalSpace();
         const background = self.matchChar('&');
+        if (background) {
+            for (commands.items) |command| {
+                switch (command) {
+                    .function_def => return error.UnsupportedConstruct,
+                    else => {},
+                }
+            }
+        }
         return .{
             .commands = try commands.toOwnedSlice(self.allocator),
             .background = background,
@@ -72,10 +82,79 @@ pub const Parser = struct {
 
     fn parseCommand(self: *Parser) ParseError!ir.Command {
         self.skipHorizontalSpace();
+        if (try self.peekFunctionDefinition()) {
+            return .{ .function_def = try self.parseFunctionDefinition() };
+        }
         if (!self.eof() and self.input[self.index] == '(') {
             return .{ .subshell = try self.parseSubshellCommand() };
         }
         return .{ .simple = try self.parseSimpleCommand() };
+    }
+
+    fn peekFunctionDefinition(self: *Parser) !bool {
+        var idx = self.index;
+        if (idx >= self.input.len) return false;
+        const first = self.input[idx];
+        if (!(std.ascii.isAlphabetic(first) or first == '_')) return false;
+        idx += 1;
+        while (idx < self.input.len) : (idx += 1) {
+            const ch = self.input[idx];
+            if (!(std.ascii.isAlphanumeric(ch) or ch == '_')) break;
+        }
+        if (idx + 1 >= self.input.len or self.input[idx] != '(' or self.input[idx + 1] != ')') return false;
+        idx += 2;
+        while (idx < self.input.len and (self.input[idx] == ' ' or self.input[idx] == '\t' or self.input[idx] == '\r')) : (idx += 1) {}
+        return idx < self.input.len and self.input[idx] == '{';
+    }
+
+    fn parseFunctionDefinition(self: *Parser) ParseError!ir.FunctionDefCommand {
+        const name_start = self.index;
+        self.index += 1;
+        while (self.index < self.input.len) : (self.index += 1) {
+            const ch = self.input[self.index];
+            if (!(std.ascii.isAlphanumeric(ch) or ch == '_')) break;
+        }
+        const name = try self.allocator.dupe(u8, self.input[name_start..self.index]);
+
+        std.debug.assert(self.input[self.index] == '(' and self.input[self.index + 1] == ')');
+        self.index += 2;
+        self.skipHorizontalSpace();
+        std.debug.assert(self.input[self.index] == '{');
+        self.index += 1;
+
+        const body_start = self.index;
+        var depth: usize = 1;
+        var in_single = false;
+        var in_double = false;
+        while (!self.eof()) {
+            const ch = self.input[self.index];
+            if (!in_double and ch == '\'') {
+                in_single = !in_single;
+                self.index += 1;
+                continue;
+            }
+            if (!in_single and ch == '"') {
+                in_double = !in_double;
+                self.index += 1;
+                continue;
+            }
+            if (!in_single and ch == '\\') {
+                self.index += 2;
+                continue;
+            }
+            if (!in_single and !in_double and ch == '{') depth += 1;
+            if (!in_single and !in_double and ch == '}') {
+                depth -= 1;
+                if (depth == 0) {
+                    const body = try self.allocator.dupe(u8, std.mem.trim(u8, self.input[body_start..self.index], " \t\r\n"));
+                    self.index += 1;
+                    return .{ .name = name, .body = body };
+                }
+            }
+            self.index += 1;
+        }
+        self.allocator.free(name);
+        return error.UnexpectedToken;
     }
 
     fn parseSimpleCommand(self: *Parser) ParseError!ir.SimpleCommand {

@@ -373,6 +373,92 @@ test "integration: command substitution uses shell semantics for builtins" {
     try std.testing.expect(std.mem.indexOf(u8, out, "echo is a shell builtin") != null);
 }
 
+test "integration: bounded function definition and invocation works" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try std.process.getCwdAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(old_cwd);
+    const path = try tmpDirPath(std.testing.allocator, tmp);
+    defer std.testing.allocator.free(path);
+    try std.posix.chdir(path);
+    defer std.posix.chdir(old_cwd) catch {};
+
+    var app = try ShellApp.init(std.testing.allocator);
+    defer app.deinit();
+    app.state.interactive = true;
+
+    _ = try app.executeText("greet() { echo hello; }\ngreet > out.txt\n", false);
+    const out = try std.fs.cwd().readFileAlloc(std.testing.allocator, "out.txt", 1024);
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqualStrings("hello\n", out);
+}
+
+test "integration: function positional args and precedence work" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try std.process.getCwdAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(old_cwd);
+    const path = try tmpDirPath(std.testing.allocator, tmp);
+    defer std.testing.allocator.free(path);
+    try std.posix.chdir(path);
+    defer std.posix.chdir(old_cwd) catch {};
+
+    var app = try ShellApp.init(std.testing.allocator);
+    defer app.deinit();
+    app.state.interactive = true;
+
+    _ = try app.executeText("echo() { printf '%s %s' $1 $2; }\necho one two > out.txt\ntype echo > type.txt\n", false);
+    const out = try std.fs.cwd().readFileAlloc(std.testing.allocator, "out.txt", 1024);
+    defer std.testing.allocator.free(out);
+    const type_out = try std.fs.cwd().readFileAlloc(std.testing.allocator, "type.txt", 1024);
+    defer std.testing.allocator.free(type_out);
+    try std.testing.expectEqualStrings("one two", out);
+    try std.testing.expect(std.mem.indexOf(u8, type_out, "echo is a shell function") != null);
+}
+
+test "integration: special builtin precedence beats function name collision" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try std.process.getCwdAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(old_cwd);
+    const path = try tmpDirPath(std.testing.allocator, tmp);
+    defer std.testing.allocator.free(path);
+    try std.posix.chdir(path);
+    defer std.posix.chdir(old_cwd) catch {};
+
+    var app = try ShellApp.init(std.testing.allocator);
+    defer app.deinit();
+    app.state.interactive = true;
+
+    _ = try app.executeText("cd() { echo nope; }\ntype cd > type.txt\n", false);
+    const type_out = try std.fs.cwd().readFileAlloc(std.testing.allocator, "type.txt", 1024);
+    defer std.testing.allocator.free(type_out);
+    try std.testing.expect(std.mem.indexOf(u8, type_out, "cd is a shell builtin") != null);
+}
+
+test "integration: functions isolate across subshell and command substitution contexts" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try std.process.getCwdAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(old_cwd);
+    const path = try tmpDirPath(std.testing.allocator, tmp);
+    defer std.testing.allocator.free(path);
+    try std.posix.chdir(path);
+    defer std.posix.chdir(old_cwd) catch {};
+
+    var app = try ShellApp.init(std.testing.allocator);
+    defer app.deinit();
+    app.state.interactive = true;
+
+    _ = try app.executeText("outer() { echo outer; }\necho $(outer) > subst.txt\n(foo() { echo sub; })\ntype foo > type.txt 2> err.txt\n", false);
+    const subst = try std.fs.cwd().readFileAlloc(std.testing.allocator, "subst.txt", 1024);
+    defer std.testing.allocator.free(subst);
+    const err = try std.fs.cwd().readFileAlloc(std.testing.allocator, "err.txt", 1024);
+    defer std.testing.allocator.free(err);
+    try std.testing.expectEqualStrings("outer\n", subst);
+    try std.testing.expect(std.mem.indexOf(u8, err, "foo: not found") != null);
+}
+
 test "integration: command substitution works in basic argument position" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

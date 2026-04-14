@@ -5,16 +5,20 @@ This project is a Linux-first, bash-like shell with bounded semantics. It is **n
 ## Supported (bounded)
 - pipelines with `|`
 - conditionals with `&&` and `||`
-- subshell groups `( ... )` in bounded forms
+- bounded subshell groups `( ... )` in supported positions
 - variable expansion: `$VAR`, `${VAR}`
-- command substitution: `$(...)` through the shell's internal execution path (bounded initial support)
+- bounded command substitution: `$(...)` through the shell's internal execution path
 - globbing: `*`, `?`, and bracket classes like `[a-z]`
 - heredocs via `<<DELIM`
+- bounded shell functions using `name() { ... }`
 - redirections: `>`, `>>`, `<`, `2>`, `2>>`, `2>&1`
 - background jobs with `&`
 - bash-like builtins documented in README
 
 ## Intentionally bounded / notable deviations
+- shell functions use one definition form only: `name() { ... }`
+- function bodies are stored as bounded text and re-parsed on call through the shell’s internal parser/executor path
+- function lookup precedence is bounded and documented in README/tests
 - subshell support is currently bounded to standalone groups, redirections on groups, and pipeline participation
 - subshell-in-conditionals may still be deferred unless it falls out naturally from the bounded model
 - command substitution remains bounded and not fully nested-parity complete
@@ -26,7 +30,7 @@ This project is a Linux-first, bash-like shell with bounded semantics. It is **n
 - history/completion UX remains rough/manual-primary
 
 ## Unsupported
-- shell functions
+- alternate function syntax forms
 - backtick command substitution
 - brace expansion
 - full general shell grammar parity

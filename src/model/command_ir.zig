@@ -101,14 +101,27 @@ pub const SubshellCommand = struct {
     }
 };
 
+pub const FunctionDefCommand = struct {
+    name: []const u8,
+    body: []const u8,
+
+    pub fn deinit(self: *FunctionDefCommand, allocator: std.mem.Allocator) void {
+        allocator.free(self.name);
+        allocator.free(self.body);
+        self.* = undefined;
+    }
+};
+
 pub const Command = union(enum) {
     simple: SimpleCommand,
     subshell: SubshellCommand,
+    function_def: FunctionDefCommand,
 
     pub fn deinit(self: *Command, allocator: std.mem.Allocator) void {
         switch (self.*) {
             .simple => |*command| command.deinit(allocator),
             .subshell => |*command| command.deinit(allocator),
+            .function_def => |*command| command.deinit(allocator),
         }
         self.* = undefined;
     }
