@@ -44,26 +44,40 @@ python3 scripts/generate_interactive_transcript.py zig-out/bin/zig-shell
 ### Command features
 - external command execution via `PATH`
 - pipelines with `|`
+- conditionals with `&&` and `||`
+- bounded subshell groups `( ... )`
 - child-safe builtins in pipelines (`echo`, `pwd`, `history`, `type`)
 - parent-mutating builtins stay rejected in pipeline/background contexts
 - redirection: `>`, `>>`, `<`, `2>`, `2>>`, `2>&1`
 - background jobs with `&`
 - single-job lookup via `jobs %n`
 - env expansion: `$VAR`, `${VAR}`
+- command substitution: `$(...)` through the shell’s internal execution path (bounded initial support)
+- globbing: `*`, `?`, `[a-z]` style classes
+- heredocs with `<<DELIM`
 - single quotes, double quotes, backslash escaping
 - startup config via `~/.zigshrc`
+- prompt override via `PS1`
 - history persistence via `~/.zigsh_history`
 - history output limiting via `history N`
 - append-on-exit history mode via `HISTAPPEND=1`
 - basic command/path completion
+- cursor-aware line editing (left/right movement, insertion, backspace at cursor)
 - non-interactive script execution
 
+### Intentionally bounded
+- subshell support is bounded, not full compound-command parity
+- command substitution is bounded and intentionally conservative
+- heredocs are intentionally narrow (no tab-strip mode)
+- unmatched globs remain literal
+- history/completion UX polish is still rough
+
 ### Not supported
-- `&&`, `||`
-- command substitution
-- heredocs
-- shell functions / subshells
-- globbing
+- shell functions
+- backtick command substitution
+- brace expansion
+- full general shell grammar parity
+- full POSIX parity
 - portability beyond Linux-first behavior
 
 ## Useful web references

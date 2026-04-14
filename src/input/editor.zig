@@ -11,7 +11,8 @@ pub fn readLine(allocator: std.mem.Allocator, state: *ShellState) !?[]u8 {
     defer buffer.deinit(allocator);
 
     var history_index: ?usize = null;
-    try redraw(state.prompt, buffer.items);
+    var cursor: usize = 0;
+    try redraw(state.prompt, buffer.items, cursor);
 
     while (true) {
         var byte: [1]u8 = undefined;
@@ -25,44 +26,70 @@ pub fn readLine(allocator: std.mem.Allocator, state: *ShellState) !?[]u8 {
         }
         const ch = byte[0];
         switch (ch) {
+            1 => { // Ctrl-A
+                cursor = 0;
+                try redraw(state.prompt, buffer.items, cursor);
+            },
+            5 => { // Ctrl-E
+                cursor = buffer.items.len;
+                try redraw(state.prompt, buffer.items, cursor);
+            },
             4 => { // Ctrl-D
                 if (buffer.items.len == 0) return null;
+                if (cursor < buffer.items.len) {
+                    _ = buffer.orderedRemove(cursor);
+                    try redraw(state.prompt, buffer.items, cursor);
+                }
             },
             3 => { // Ctrl-C
                 buffer.clearRetainingCapacity();
+                cursor = 0;
                 history_index = null;
                 _ = try std.posix.write(std.posix.STDOUT_FILENO, "^C\n");
-                try redraw(state.prompt, buffer.items);
+                try redraw(state.prompt, buffer.items, cursor);
             },
             '\r', '\n' => {
                 _ = try std.posix.write(std.posix.STDOUT_FILENO, "\n");
                 break;
             },
             127, 8 => {
-                _ = buffer.pop();
-                try redraw(state.prompt, buffer.items);
+                if (cursor > 0) {
+                    _ = buffer.orderedRemove(cursor - 1);
+                    cursor -= 1;
+                    try redraw(state.prompt, buffer.items, cursor);
+                }
             },
             '\t' => {
-                try applyCompletion(allocator, state, &buffer);
+                cursor = try applyCompletion(allocator, state, &buffer, cursor);
                 history_index = null;
-                try redraw(state.prompt, buffer.items);
+                try redraw(state.prompt, buffer.items, cursor);
             },
             27 => {
-                var seq: [2]u8 = undefined;
+                var seq: [3]u8 = undefined;
                 const read_n = std.posix.read(std.posix.STDIN_FILENO, &seq) catch 0;
-                if (read_n == 2 and seq[0] == '[') {
+                if (read_n >= 2 and seq[0] == '[') {
                     switch (seq[1]) {
-                        'A' => try historyPrev(allocator, state, &buffer, &history_index),
-                        'B' => try historyNext(allocator, state, &buffer, &history_index),
+                        'A' => try historyPrev(allocator, state, &buffer, &history_index, &cursor),
+                        'B' => try historyNext(allocator, state, &buffer, &history_index, &cursor),
+                        'C' => {
+                            if (cursor < buffer.items.len) cursor += 1;
+                        },
+                        'D' => {
+                            if (cursor > 0) cursor -= 1;
+                        },
+                        'H' => cursor = 0,
+                        'F' => cursor = buffer.items.len,
                         else => {},
                     }
-                    try redraw(state.prompt, buffer.items);
+                    try redraw(state.prompt, buffer.items, cursor);
                 }
             },
             else => {
                 if (std.ascii.isPrint(ch)) {
-                    try buffer.append(allocator, ch);
-                    try redraw(state.prompt, buffer.items);
+                    try buffer.insert(allocator, cursor, ch);
+                    cursor += 1;
+                    history_index = null;
+                    try redraw(state.prompt, buffer.items, cursor);
                 }
             },
         }
@@ -71,29 +98,38 @@ pub fn readLine(allocator: std.mem.Allocator, state: *ShellState) !?[]u8 {
     return try buffer.toOwnedSlice(allocator);
 }
 
-fn redraw(prompt: []const u8, line: []const u8) !void {
+fn redraw(prompt: []const u8, line: []const u8, cursor: usize) !void {
     _ = try std.posix.write(std.posix.STDOUT_FILENO, "\r\x1b[2K");
     _ = try std.posix.write(std.posix.STDOUT_FILENO, prompt);
     _ = try std.posix.write(std.posix.STDOUT_FILENO, line);
+    const tail = line.len - cursor;
+    if (tail > 0) {
+        var buf: [32]u8 = undefined;
+        const rendered = try std.fmt.bufPrint(&buf, "\x1b[{d}D", .{tail});
+        _ = try std.posix.write(std.posix.STDOUT_FILENO, rendered);
+    }
 }
 
-fn historyPrev(allocator: std.mem.Allocator, state: *ShellState, buffer: *std.ArrayList(u8), history_index: *?usize) !void {
+fn historyPrev(allocator: std.mem.Allocator, state: *ShellState, buffer: *std.ArrayList(u8), history_index: *?usize, cursor: *usize) !void {
     if (state.history.items.len == 0) return;
     const next_index = if (history_index.*) |idx| if (idx > 0) idx - 1 else 0 else state.history.items.len - 1;
     history_index.* = next_index;
     try setBuffer(allocator, buffer, state.history.items[next_index]);
+    cursor.* = buffer.items.len;
 }
 
-fn historyNext(allocator: std.mem.Allocator, state: *ShellState, buffer: *std.ArrayList(u8), history_index: *?usize) !void {
+fn historyNext(allocator: std.mem.Allocator, state: *ShellState, buffer: *std.ArrayList(u8), history_index: *?usize, cursor: *usize) !void {
     if (state.history.items.len == 0 or history_index.* == null) return;
     const idx = history_index.*.?;
     if (idx + 1 >= state.history.items.len) {
         history_index.* = null;
         buffer.clearRetainingCapacity();
+        cursor.* = 0;
         return;
     }
     history_index.* = idx + 1;
     try setBuffer(allocator, buffer, state.history.items[idx + 1]);
+    cursor.* = buffer.items.len;
 }
 
 fn setBuffer(allocator: std.mem.Allocator, buffer: *std.ArrayList(u8), value: []const u8) !void {
@@ -101,9 +137,9 @@ fn setBuffer(allocator: std.mem.Allocator, buffer: *std.ArrayList(u8), value: []
     try buffer.appendSlice(allocator, value);
 }
 
-fn applyCompletion(allocator: std.mem.Allocator, state: *ShellState, buffer: *std.ArrayList(u8)) !void {
-    const fragment = currentFragment(buffer.items);
-    if (fragment.len == 0) return;
+fn applyCompletion(allocator: std.mem.Allocator, state: *ShellState, buffer: *std.ArrayList(u8), cursor: usize) !usize {
+    const fragment = currentFragment(buffer.items[0..cursor]);
+    if (fragment.len == 0) return cursor;
 
     var candidates = std.ArrayList([]u8).empty;
     defer {
@@ -117,12 +153,16 @@ fn applyCompletion(allocator: std.mem.Allocator, state: *ShellState, buffer: *st
         try gatherCommandCandidates(allocator, state, fragment, &candidates);
         try gatherPathCandidates(allocator, fragment, &candidates);
     }
-    if (candidates.items.len == 0) return;
+    if (candidates.items.len == 0) return cursor;
 
     const replacement = if (candidates.items.len == 1) candidates.items[0] else commonPrefix(candidates.items);
     if (replacement.len > fragment.len) {
-        buffer.items.len -= fragment.len;
-        try buffer.appendSlice(allocator, replacement);
+        const start = cursor - fragment.len;
+        for (0..fragment.len) |_| {
+            _ = buffer.orderedRemove(start);
+        }
+        try buffer.insertSlice(allocator, start, replacement);
+        return start + replacement.len;
     } else if (candidates.items.len > 1) {
         _ = try std.posix.write(std.posix.STDOUT_FILENO, "\n");
         for (candidates.items) |candidate| {
@@ -130,6 +170,7 @@ fn applyCompletion(allocator: std.mem.Allocator, state: *ShellState, buffer: *st
             _ = try std.posix.write(std.posix.STDOUT_FILENO, "\n");
         }
     }
+    return cursor;
 }
 
 fn currentFragment(line: []const u8) []const u8 {

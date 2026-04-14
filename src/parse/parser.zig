@@ -42,16 +42,19 @@ pub const Parser = struct {
     }
 
     fn parsePipeline(self: *Parser) ParseError!ir.Pipeline {
-        var commands = std.ArrayList(ir.SimpleCommand).empty;
+        var commands = std.ArrayList(ir.Command).empty;
         errdefer {
             for (commands.items) |*command| command.deinit(self.allocator);
             commands.deinit(self.allocator);
         }
 
         while (true) {
-            const cmd = try self.parseSimpleCommand();
-            if (cmd.isEmpty()) return error.UnexpectedToken;
-            try commands.append(self.allocator, cmd);
+            const command = try self.parseCommand();
+            switch (command) {
+                .simple => |simple| if (simple.isEmpty()) return error.UnexpectedToken,
+                .subshell => {},
+            }
+            try commands.append(self.allocator, command);
             self.skipHorizontalSpace();
             if (self.peekTwo('&', '&') or self.peekTwo('|', '|')) return error.UnsupportedConstruct;
             if (!self.matchChar('|')) break;
@@ -65,6 +68,14 @@ pub const Parser = struct {
             .background = background,
             .source = &.{},
         };
+    }
+
+    fn parseCommand(self: *Parser) ParseError!ir.Command {
+        self.skipHorizontalSpace();
+        if (!self.eof() and self.input[self.index] == '(') {
+            return .{ .subshell = try self.parseSubshellCommand() };
+        }
+        return .{ .simple = try self.parseSimpleCommand() };
     }
 
     fn parseSimpleCommand(self: *Parser) ParseError!ir.SimpleCommand {
@@ -109,14 +120,69 @@ pub const Parser = struct {
         };
     }
 
+    fn parseSubshellCommand(self: *Parser) ParseError!ir.SubshellCommand {
+        std.debug.assert(self.input[self.index] == '(');
+        self.index += 1;
+        const start = self.index;
+        var depth: usize = 1;
+        var in_single = false;
+        var in_double = false;
+
+        while (!self.eof()) {
+            const ch = self.input[self.index];
+            if (!in_double and ch == '\'') {
+                in_single = !in_single;
+                self.index += 1;
+                continue;
+            }
+            if (!in_single and ch == '"') {
+                in_double = !in_double;
+                self.index += 1;
+                continue;
+            }
+            if (!in_single and ch == '\\') {
+                self.index += 2;
+                continue;
+            }
+            if (!in_single and ch == '(') depth += 1;
+            if (!in_single and ch == ')') {
+                depth -= 1;
+                if (depth == 0) {
+                    const text = try self.allocator.dupe(u8, std.mem.trim(u8, self.input[start..self.index], " \t\r\n"));
+                    self.index += 1;
+                    var redirections = std.ArrayList(ir.Redirection).empty;
+                    errdefer {
+                        self.allocator.free(text);
+                        for (redirections.items) |*redir| redir.deinit(self.allocator);
+                        redirections.deinit(self.allocator);
+                    }
+                    while (true) {
+                        self.skipHorizontalSpace();
+                        if (!self.atRedirection()) break;
+                        try redirections.append(self.allocator, try self.parseRedirection());
+                    }
+                    return .{
+                        .text = text,
+                        .redirections = try redirections.toOwnedSlice(self.allocator),
+                    };
+                }
+            }
+            self.index += 1;
+        }
+        return error.UnexpectedToken;
+    }
+
     fn assignmentFromWord(self: *Parser, word_in: ir.Word) !ir.Assignment {
         var word = word_in;
         var raw = std.ArrayList(u8).empty;
         defer raw.deinit(self.allocator);
         for (word.pieces) |piece| {
             switch (piece) {
-                .literal => |text| try raw.appendSlice(self.allocator, text),
-                .variable => unreachable,
+                .literal => |piece_data| {
+                    if (piece_data.quoted) unreachable;
+                    try raw.appendSlice(self.allocator, piece_data.text);
+                },
+                .variable, .command_substitution => unreachable,
             }
         }
         const eq = std.mem.indexOfScalar(u8, raw.items, '=') orelse unreachable;
@@ -125,7 +191,7 @@ pub const Parser = struct {
         var pieces = std.ArrayList(ir.WordPiece).empty;
         errdefer pieces.deinit(self.allocator);
         if (eq + 1 < raw.items.len) {
-            try pieces.append(self.allocator, .{ .literal = try self.allocator.dupe(u8, raw.items[eq + 1 ..]) });
+            try pieces.append(self.allocator, .{ .literal = .{ .text = try self.allocator.dupe(u8, raw.items[eq + 1 ..]), .quoted = false } });
         }
         const value_word = ir.Word{ .pieces = try pieces.toOwnedSlice(self.allocator) };
         word.deinit(self.allocator);
@@ -161,8 +227,9 @@ pub const Parser = struct {
         var pieces = std.ArrayList(ir.WordPiece).empty;
         errdefer {
             for (pieces.items) |piece| switch (piece) {
-                .literal => |text| self.allocator.free(text),
-                .variable => |text| self.allocator.free(text),
+                .literal => |data| self.allocator.free(data.text),
+                .variable => |data| self.allocator.free(data.text),
+                .command_substitution => |data| self.allocator.free(data.text),
             };
             pieces.deinit(self.allocator);
         }
@@ -175,7 +242,6 @@ pub const Parser = struct {
             if (ch == ' ' or ch == '\t' or ch == '\n' or ch == ';' or ch == '|' or ch == '&') break;
             if (self.atRedirection()) break;
             if (ch == '`') return error.UnsupportedConstruct;
-            if (ch == '$' and self.peekOffset(1) == '(') return error.UnsupportedConstruct;
             if (ch == '(' or ch == ')') return error.UnsupportedConstruct;
 
             switch (ch) {
@@ -192,7 +258,7 @@ pub const Parser = struct {
                     while (!self.eof() and self.input[self.index] != '\'') self.index += 1;
                     if (self.eof()) return error.UnterminatedSingleQuote;
                     const slice = self.input[start..self.index];
-                    try pieces.append(self.allocator, .{ .literal = try self.allocator.dupe(u8, slice) });
+                    try pieces.append(self.allocator, .{ .literal = .{ .text = try self.allocator.dupe(u8, slice), .quoted = true } });
                     self.index += 1;
                 },
                 '"' => {
@@ -210,9 +276,14 @@ pub const Parser = struct {
                             self.index += 1;
                             continue;
                         }
+                        if (inner == '$' and self.peekOffset(1) == '(') {
+                            try self.flushLiteralQuoted(&pieces, &literal, true);
+                            try pieces.append(self.allocator, .{ .command_substitution = .{ .text = try self.parseCommandSubstitution(), .quoted = true } });
+                            continue;
+                        }
                         if (inner == '$') {
-                            try self.flushLiteral(&pieces, &literal);
-                            try pieces.append(self.allocator, .{ .variable = try self.parseVariableName() });
+                            try self.flushLiteralQuoted(&pieces, &literal, true);
+                            try pieces.append(self.allocator, .{ .variable = .{ .text = try self.parseVariableName(), .quoted = true } });
                             continue;
                         }
                         try literal.append(self.allocator, inner);
@@ -224,7 +295,11 @@ pub const Parser = struct {
                 },
                 '$' => {
                     try self.flushLiteral(&pieces, &literal);
-                    try pieces.append(self.allocator, .{ .variable = try self.parseVariableName() });
+                    if (self.peekOffset(1) == '(') {
+                        try pieces.append(self.allocator, .{ .command_substitution = .{ .text = try self.parseCommandSubstitution(), .quoted = false } });
+                    } else {
+                        try pieces.append(self.allocator, .{ .variable = .{ .text = try self.parseVariableName(), .quoted = false } });
+                    }
                 },
                 else => {
                     try literal.append(self.allocator, ch);
@@ -266,9 +341,54 @@ pub const Parser = struct {
         return self.allocator.dupe(u8, self.input[start..self.index]);
     }
 
+    fn parseCommandSubstitution(self: *Parser) ![]const u8 {
+        std.debug.assert(self.input[self.index] == '$');
+        self.index += 1;
+        std.debug.assert(self.input[self.index] == '(');
+        self.index += 1;
+        const start = self.index;
+        var depth: usize = 1;
+        var in_single = false;
+        var in_double = false;
+        while (!self.eof()) {
+            const ch = self.input[self.index];
+            if (!in_double and ch == '\'') {
+                in_single = !in_single;
+                self.index += 1;
+                continue;
+            }
+            if (!in_single and ch == '"') {
+                in_double = !in_double;
+                self.index += 1;
+                continue;
+            }
+            if (!in_single and ch == '\\') {
+                self.index += 2;
+                continue;
+            }
+            if (!in_single and ch == '(') depth += 1;
+            if (!in_single and ch == ')') {
+                depth -= 1;
+                if (depth == 0) {
+                    const text = try self.allocator.dupe(u8, self.input[start..self.index]);
+                    self.index += 1;
+                    return text;
+                }
+            }
+            self.index += 1;
+        }
+        return error.UnexpectedToken;
+    }
+
     fn flushLiteral(self: *Parser, pieces: *std.ArrayList(ir.WordPiece), literal: *std.ArrayList(u8)) !void {
         if (literal.items.len == 0) return;
-        try pieces.append(self.allocator, .{ .literal = try self.allocator.dupe(u8, literal.items) });
+        try pieces.append(self.allocator, .{ .literal = .{ .text = try self.allocator.dupe(u8, literal.items), .quoted = false } });
+        literal.clearRetainingCapacity();
+    }
+
+    fn flushLiteralQuoted(self: *Parser, pieces: *std.ArrayList(ir.WordPiece), literal: *std.ArrayList(u8), quoted: bool) !void {
+        if (literal.items.len == 0) return;
+        try pieces.append(self.allocator, .{ .literal = .{ .text = try self.allocator.dupe(u8, literal.items), .quoted = quoted } });
         literal.clearRetainingCapacity();
     }
 
@@ -332,16 +452,20 @@ test "parse pipeline and redirection" {
     defer cmd_list.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 1), cmd_list.pipelines.len);
     try std.testing.expectEqual(@as(usize, 2), cmd_list.pipelines[0].commands.len);
-    try std.testing.expectEqual(@as(usize, 1), cmd_list.pipelines[0].commands[1].redirections.len);
+    try std.testing.expectEqual(@as(usize, 1), cmd_list.pipelines[0].commands[1].simple.redirections.len);
 }
 
 test "parse stderr append redirection" {
     var cmd_list = try parse(std.testing.allocator, "echo hi 2>> err.txt\n");
     defer cmd_list.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 1), cmd_list.pipelines[0].commands[0].redirections.len);
-    try std.testing.expectEqual(ir.RedirectionKind.stderr_append, cmd_list.pipelines[0].commands[0].redirections[0].kind);
+    try std.testing.expectEqual(@as(usize, 1), cmd_list.pipelines[0].commands[0].simple.redirections.len);
+    try std.testing.expectEqual(ir.RedirectionKind.stderr_append, cmd_list.pipelines[0].commands[0].simple.redirections[0].kind);
 }
 
-test "reject unsupported constructs" {
-    try std.testing.expectError(error.UnsupportedConstruct, parse(std.testing.allocator, "echo $(whoami)\n"));
+test "parse command substitution" {
+    var cmd_list = try parse(std.testing.allocator, "echo $(whoami)\n");
+    defer cmd_list.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), cmd_list.pipelines.len);
+    try std.testing.expectEqual(@as(usize, 1), cmd_list.pipelines[0].commands.len);
+    try std.testing.expectEqual(@as(usize, 2), cmd_list.pipelines[0].commands[0].simple.argv.len);
 }

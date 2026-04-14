@@ -78,6 +78,7 @@ pub const ShellApp = struct {
         while (!self.state.should_exit) {
             jobs.poll(&self.state);
             self.state.removeCompletedJobs();
+            self.state.prompt = self.state.env.get("PS1") orelse "zigsh$ ";
             const line = (try editor.readLine(self.allocator, &self.state)) orelse break;
             defer self.allocator.free(line);
             const trimmed = std.mem.trim(u8, line, " \t\r\n");

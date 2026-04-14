@@ -1,8 +1,14 @@
 const std = @import("std");
 
+pub const PieceData = struct {
+    text: []const u8,
+    quoted: bool = false,
+};
+
 pub const WordPiece = union(enum) {
-    literal: []const u8,
-    variable: []const u8,
+    literal: PieceData,
+    variable: PieceData,
+    command_substitution: PieceData,
 };
 
 pub const Word = struct {
@@ -12,8 +18,9 @@ pub const Word = struct {
         var pieces = try allocator.alloc(WordPiece, pieces_in.len);
         for (pieces_in, 0..) |piece, i| {
             pieces[i] = switch (piece) {
-                .literal => |value| .{ .literal = try allocator.dupe(u8, value) },
-                .variable => |value| .{ .variable = try allocator.dupe(u8, value) },
+                .literal => |value| .{ .literal = .{ .text = try allocator.dupe(u8, value.text), .quoted = value.quoted } },
+                .variable => |value| .{ .variable = .{ .text = try allocator.dupe(u8, value.text), .quoted = value.quoted } },
+                .command_substitution => |value| .{ .command_substitution = .{ .text = try allocator.dupe(u8, value.text), .quoted = value.quoted } },
             };
         }
         return .{ .pieces = pieces };
@@ -22,8 +29,9 @@ pub const Word = struct {
     pub fn deinit(self: *Word, allocator: std.mem.Allocator) void {
         for (self.pieces) |piece| {
             switch (piece) {
-                .literal => |value| allocator.free(value),
-                .variable => |value| allocator.free(value),
+                .literal => |value| allocator.free(value.text),
+                .variable => |value| allocator.free(value.text),
+                .command_substitution => |value| allocator.free(value.text),
             }
         }
         allocator.free(self.pieces);
@@ -81,8 +89,33 @@ pub const SimpleCommand = struct {
     }
 };
 
+pub const SubshellCommand = struct {
+    text: []const u8,
+    redirections: []Redirection,
+
+    pub fn deinit(self: *SubshellCommand, allocator: std.mem.Allocator) void {
+        allocator.free(self.text);
+        for (self.redirections) |*redir| redir.deinit(allocator);
+        allocator.free(self.redirections);
+        self.* = undefined;
+    }
+};
+
+pub const Command = union(enum) {
+    simple: SimpleCommand,
+    subshell: SubshellCommand,
+
+    pub fn deinit(self: *Command, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .simple => |*command| command.deinit(allocator),
+            .subshell => |*command| command.deinit(allocator),
+        }
+        self.* = undefined;
+    }
+};
+
 pub const Pipeline = struct {
-    commands: []SimpleCommand,
+    commands: []Command,
     background: bool,
     source: []const u8,
 

@@ -1,6 +1,6 @@
 # Claim-to-Evidence Matrix
 
-This matrix is the primary ownership map for retained zig-shell claims after the missing-items expansion.
+This matrix is the primary ownership map for retained zig-shell claims after the focused subshells + stronger command substitution milestone.
 
 | Claim | Primary evidence source | Supporting evidence | Status |
 |---|---|---|---|
@@ -20,5 +20,12 @@ This matrix is the primary ownership map for retained zig-shell claims after the
 | `type` reports builtin vs executable vs not found consistently with execution lookup | integration test (`src/test_support/harness.zig`) | transcript/manual demo | retained |
 | `2>>` appends stderr correctly | integration test (`src/test_support/harness.zig`) | transcript/manual demo | retained |
 | Child-safe builtins can participate in pipelines while parent-only builtins remain rejected | integration test (`src/test_support/harness.zig`) | manual checklist | retained |
+| `&&` / `||` short-circuit correctly | integration test (`src/test_support/harness.zig`) | docs | retained |
+| Unquoted globbing expands and quoted globs stay literal | integration test (`src/test_support/harness.zig`) | docs | retained |
+| Heredoc content reaches stdin of the target command | integration test (`src/test_support/harness.zig`) | docs | retained |
+| Bounded `$(...)` command substitution works in basic argument position | integration test (`src/test_support/harness.zig`) | docs | retained |
+| Bounded subshell groups `( ... )` execute and isolate parent state correctly | integration test (`src/test_support/harness.zig`) | docs | retained |
+| Prompt can be influenced by shell config (`PS1`) | manual checklist | transcript | retained, manual-primary |
+| Cursor-aware editing is available (left/right, insertion, backspace at cursor) | manual checklist | transcript | retained, manual-primary |
 | Completion redraw/candidate UX polish | manual checklist only | transcript | manual-only |
 | `docs/verification/interactive-transcript.txt` | supplemental only | generated script output | non-canonical |

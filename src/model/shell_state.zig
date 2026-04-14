@@ -29,6 +29,7 @@ pub const ShellState = struct {
     exit_code: u8,
     history_path: []u8,
     rc_path: []u8,
+    self_exe_path: []u8,
     shell_pgid: i32,
     prompt: []const u8,
     startup_loaded: bool,
@@ -39,6 +40,7 @@ pub const ShellState = struct {
         const home = env.get("HOME") orelse ".";
         const history_path = try std.fs.path.join(allocator, &.{ home, ".zigsh_history" });
         const rc_path = try std.fs.path.join(allocator, &.{ home, ".zigshrc" });
+        const self_exe_path = try std.fs.selfExePathAlloc(allocator);
         return .{
             .allocator = allocator,
             .env = env,
@@ -53,6 +55,7 @@ pub const ShellState = struct {
             .exit_code = 0,
             .history_path = history_path,
             .rc_path = rc_path,
+            .self_exe_path = self_exe_path,
             .shell_pgid = 0,
             .prompt = "zigsh$ ",
             .startup_loaded = false,
@@ -73,6 +76,7 @@ pub const ShellState = struct {
         self.free_job_ids.deinit(self.allocator);
         self.allocator.free(self.history_path);
         self.allocator.free(self.rc_path);
+        self.allocator.free(self.self_exe_path);
         self.* = undefined;
     }
 

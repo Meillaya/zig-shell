@@ -17,8 +17,12 @@ pub fn isAssignmentWord(word: *const ir.Word) bool {
     var fbs = std.io.fixedBufferStream(&buf);
     for (word.pieces) |piece| {
         switch (piece) {
-            .literal => |text| fbs.writer().writeAll(text) catch return false,
+            .literal => |piece_data| {
+                if (piece_data.quoted) return false;
+                fbs.writer().writeAll(piece_data.text) catch return false;
+            },
             .variable => return false,
+            .command_substitution => return false,
         }
     }
     const data = fbs.getWritten();
