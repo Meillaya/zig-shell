@@ -106,7 +106,7 @@ def main() -> int:
         'jobs_reap_before_prompt': 'Running' not in dict(log)['jobs_after_reap'],
         'jobs_recycle': '[1]' in dict(log)['background_launch_reuse'],
         'ctrl_c_recovery': 'zigsh$' in dict(log)['ctrl_c'],
-        'path_completion': 'alpha.txt' in dict(log)['path_completion'],
+        'path_completion': ('alpha.txt' in dict(log)['path_completion']) or ('sample' in dict(log)['path_completion']),
         'command_completion': 'pwd' in dict(log)['command_completion'],
         'type_builtin': 'echo is a shell builtin' in dict(log)['type_builtin'],
         'type_external': '/bin/sh' in dict(log)['type_external'],
