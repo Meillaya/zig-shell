@@ -1,0 +1,4 @@
+.zig-cache/
+zig-out/
+.omx/
+demo-out.txt
